@@ -119,100 +119,59 @@ def format_message(role: str, content: str):
 def main():
     init_session_state()
     
-    # Get Hugging Face token from secrets or user input
+    # Load configuration from secrets
     try:
         hf_token = st.secrets["HUGGINGFACE_TOKEN"]
-        token_source = "secrets"
-    except (KeyError, FileNotFoundError):
-        hf_token = ""
-        token_source = "user_input"
-    
-    # Sidebar for configuration
-    with st.sidebar:
-        st.header("🔧 Configuration")
+        model_name = st.secrets.get("DEFAULT_MODEL", "Qwen/Qwen2.5-72B-Instruct")
+        endpoint_type = st.secrets.get("DEFAULT_ENDPOINT_TYPE", "Inference API")
         
-        # Hugging Face Token (only show input if not in secrets)
-        if token_source == "user_input":
-            hf_token = st.text_input(
-                "Hugging Face Token",
-                type="password",
-                value=st.session_state.hf_token,
-                help="Enter your Hugging Face API token"
-            )
-        else:
-            st.success("🔐 Token loaded from secrets")
-            # Option to override with manual input
-            if st.checkbox("Override with manual token"):
-                hf_token = st.text_input(
-                    "Hugging Face Token",
-                    type="password",
-                    help="Enter your Hugging Face API token"
-                )
-        
-        # Model endpoint options with J.A.R.V.I.S. defaults
-        try:
-            default_model = st.secrets.get("DEFAULT_MODEL", "Qwen/Qwen2.5-72B-Instruct")
-            default_endpoint_type = st.secrets.get("DEFAULT_ENDPOINT_TYPE", "Inference API")
-        except (KeyError, FileNotFoundError):
-            default_model = "Qwen/Qwen2.5-72B-Instruct"
-            default_endpoint_type = "Inference API"
-        
-        endpoint_type = st.selectbox(
-            "Endpoint Type",
-            ["Inference API", "Custom Endpoint", "Hugging Face Space"],
-            index=["Inference API", "Custom Endpoint", "Hugging Face Space"].index(default_endpoint_type)
-        )
-        
+        # Set endpoint based on type
         if endpoint_type == "Inference API":
-            model_name = st.text_input(
-                "Model Name",
-                value=default_model,
-                placeholder="Qwen/Qwen2.5-72B-Instruct",
-                help="Enter the model name from Hugging Face Hub"
-            )
-            endpoint = f"https://api-inference.huggingface.co/models/{model_name}" if model_name else ""
-            
+            endpoint = f"https://api-inference.huggingface.co/models/{model_name}"
         elif endpoint_type == "Custom Endpoint":
-            default_custom_endpoint = st.secrets.get("CUSTOM_ENDPOINT_URL", "") if token_source == "secrets" else ""
-            endpoint = st.text_input(
-                "Custom Endpoint URL",
-                value=default_custom_endpoint,
-                placeholder="https://your-endpoint.com/api/chat",
-                help="Enter your custom model endpoint URL"
-            )
-            
+            endpoint = st.secrets.get("CUSTOM_ENDPOINT_URL", "")
         else:  # Hugging Face Space
-            default_space = st.secrets.get("HF_SPACE_NAME", "") if token_source == "secrets" else ""
-            space_name = st.text_input(
-                "Space Name",
-                value=default_space,
-                placeholder="username/space-name",
-                help="Enter the Hugging Face Space name"
-            )
+            space_name = st.secrets.get("HF_SPACE_NAME", "")
             endpoint = f"https://hf.space/{space_name}/api/chat" if space_name else ""
         
-        # Advanced settings
-        with st.expander("⚙️ Advanced Settings"):
-            max_length = st.slider("Max Response Length", 50, 500, 150)
-            temperature = st.slider("Temperature", 0.1, 2.0, 0.7, 0.1)
-            top_p = st.slider("Top P", 0.1, 1.0, 0.9, 0.1)
+        # Advanced settings from secrets (with defaults)
+        max_length = st.secrets.get("MAX_RESPONSE_LENGTH", 200)
+        temperature = st.secrets.get("TEMPERATURE", 0.7)
+        top_p = st.secrets.get("TOP_P", 0.9)
         
-        # Save configuration
-        if st.button("💾 Save Configuration"):
-            st.session_state.hf_token = hf_token
-            st.session_state.model_endpoint = endpoint
-            st.success("Configuration saved!")
+    except (KeyError, FileNotFoundError):
+        st.error("🚨 **Configuration Error**: Required secrets not found. Please check your Streamlit secrets configuration.")
+        st.markdown("""
+        **Required secrets:**
+        ```toml
+        HUGGINGFACE_TOKEN = "hf_your_token_here"
+        DEFAULT_MODEL = "Qwen/Qwen2.5-72B-Instruct"
+        DEFAULT_ENDPOINT_TYPE = "Inference API"
+        ```
+        """)
+        return
+    
+    # Sidebar with minimal controls
+    with st.sidebar:
+        st.header("🤖 J.A.R.V.I.S. Controls")
+        
+        # Status indicators
+        st.success("🔐 Configuration loaded from secrets")
+        st.info(f"🧠 Model: {model_name}")
+        st.info(f"🌐 Endpoint: {endpoint_type}")
+        
+        st.markdown("---")
         
         # Clear chat history
-        if st.button("🗑️ Clear Chat History"):
+        if st.button("🗑️ Clear Chat History", use_container_width=True):
             st.session_state.messages = []
             st.rerun()
         
-        # Display current configuration
-        st.markdown("---")
-        st.markdown("**Current Configuration:**")
-        st.text(f"Token: {'✓ Set' if hf_token else '✗ Not set'}")
-        st.text(f"Endpoint: {'✓ Set' if endpoint else '✗ Not set'}")
+        # Chat statistics
+        if st.session_state.messages:
+            st.markdown("📊 **Chat Statistics**")
+            st.text(f"Messages: {len(st.session_state.messages)}")
+            st.text(f"Conversations: {len(st.session_state.messages) // 2}")
     
     # Main chat interface
     st.title("🤖 J.A.R.V.I.S. - AI Assistant")
@@ -232,11 +191,6 @@ def main():
         
         *Powered by Qwen/Qwen2.5-72B-Instruct model*
         """)
-    
-    # Check if configuration is complete
-    if not hf_token or not endpoint:
-        st.warning("⚠️ Please configure your Hugging Face token and model endpoint in the sidebar to start chatting.")
-        return
     
     # Display chat history
     chat_container = st.container()
