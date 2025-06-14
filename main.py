@@ -45,6 +45,16 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# Alternative models that are more likely to work
+AVAILABLE_MODELS = {
+    "Microsoft DialoGPT Large": "microsoft/DialoGPT-large",
+    "Facebook BlenderBot": "facebook/blenderbot-400M-distill",
+    "Google Flan-T5 Large": "google/flan-t5-large",
+    "Mistral 7B Instruct": "mistralai/Mistral-7B-Instruct-v0.1",
+    "Code Llama Instruct": "codellama/CodeLlama-7b-Instruct-hf",
+    "Qwen 2.5 (if available)": "Qwen/Qwen2.5-72B-Instruct"
+}
+
 def init_session_state():
     """Initialize session state variables"""
     if "messages" not in st.session_state:
@@ -54,23 +64,55 @@ def init_session_state():
     if "model_endpoint" not in st.session_state:
         st.session_state.model_endpoint = ""
 
-def query_huggingface_api(payload: Dict, headers: Dict, endpoint: str) -> str:
-    """Query the Hugging Face API"""
+def test_model_availability(model_name: str, hf_token: str) -> bool:
+    """Test if a model is available on Hugging Face Inference API"""
+    endpoint = f"https://api-inference.huggingface.co/models/{model_name}"
+    headers = {"Authorization": f"Bearer {hf_token}"}
+    
     try:
-        response = requests.post(endpoint, headers=headers, json=payload)
+        # Send a simple test request
+        test_payload = {"inputs": "Hello", "parameters": {"max_new_tokens": 1}}
+        response = requests.post(endpoint, headers=headers, json=test_payload, timeout=10)
+        
+        # Check if the response indicates the model is available
+        if response.status_code == 200:
+            return True
+        elif response.status_code == 503:
+            # Model is loading, but available
+            return True
+        elif response.status_code == 404:
+            # Model not found
+            return False
+        else:
+            return False
+    except Exception:
+        return False
+
+def query_huggingface_api(payload: Dict, headers: Dict, endpoint: str) -> str:
+    """Query the Hugging Face API with better error handling"""
+    try:
+        response = requests.post(endpoint, headers=headers, json=payload, timeout=30)
+        
+        # Handle different status codes
+        if response.status_code == 503:
+            # Model is loading
+            st.warning("⏳ Model is loading. This may take a few moments...")
+            time.sleep(20)  # Wait and retry
+            response = requests.post(endpoint, headers=headers, json=payload, timeout=30)
+        
         response.raise_for_status()
         
         # Handle different response formats
         result = response.json()
         
-        # For text generation models (like Qwen)
+        # For text generation models
         if isinstance(result, list) and len(result) > 0:
             if 'generated_text' in result[0]:
                 generated = result[0]['generated_text']
                 # Remove the input prompt from the response
                 if 'inputs' in payload and payload['inputs'] in generated:
                     generated = generated.replace(payload['inputs'], '').strip()
-                return generated
+                return generated if generated else "I apologize, but I couldn't generate a proper response. Please try again."
             elif 'text' in result[0]:
                 return result[0]['text']
         
@@ -81,20 +123,29 @@ def query_huggingface_api(payload: Dict, headers: Dict, endpoint: str) -> str:
                 # Remove the input prompt from the response
                 if 'inputs' in payload and payload['inputs'] in generated:
                     generated = generated.replace(payload['inputs'], '').strip()
-                return generated
+                return generated if generated else "I apologize, but I couldn't generate a proper response. Please try again."
             elif 'response' in result:
                 return result['response']
             elif 'text' in result:
                 return result['text']
+            elif 'error' in result:
+                st.error(f"API Error: {result['error']}")
+                return "I encountered an error while processing your request. Please try again or try a different model."
         
         return str(result)
         
+    except requests.exceptions.Timeout:
+        st.error("Request timed out. The model might be busy.")
+        return "I apologize for the delay. The system is currently experiencing high demand. Please try again shortly."
     except requests.exceptions.RequestException as e:
+        if "404" in str(e):
+            st.error("Model not found. Please check if the model exists and is accessible.")
+            return "The selected model appears to be unavailable. Please try selecting a different model."
         st.error(f"API Request Error: {str(e)}")
         return "I apologize, but I'm experiencing some connectivity issues at the moment. Please try again shortly."
     except json.JSONDecodeError:
         st.error("Error: Invalid JSON response from API")
-        return "I received an unexpected response format. Please check your endpoint configuration."
+        return "I received an unexpected response format. Please check your configuration."
     except Exception as e:
         st.error(f"Unexpected Error: {str(e)}")
         return "Something unexpected occurred. Let me try to assist you differently."
@@ -109,7 +160,7 @@ def format_message(role: str, content: str):
         </div>
         """, unsafe_allow_html=True)
     else:
-                    st.markdown(f"""
+        st.markdown(f"""
         <div class="chat-message assistant-message">
             <div class="message-header">🤖 J.A.R.V.I.S.</div>
             <div class="message-content">{content}</div>
@@ -119,48 +170,69 @@ def format_message(role: str, content: str):
 def main():
     init_session_state()
     
-    # Load configuration from secrets
+    # Load configuration from secrets with fallback
     try:
-        hf_token = st.secrets["HUGGINGFACE_TOKEN"]
-        model_name = st.secrets.get("DEFAULT_MODEL", "Qwen/Qwen2.5-72B-Instruct")
+        hf_token = st.secrets.get("HUGGINGFACE_TOKEN", "")
+        if not hf_token:
+            st.error("🚨 **Configuration Error**: HUGGINGFACE_TOKEN not found in secrets.")
+            return
+            
+        # Try to get model from secrets, with fallback options
+        preferred_model = st.secrets.get("DEFAULT_MODEL", "microsoft/DialoGPT-large")
         endpoint_type = st.secrets.get("DEFAULT_ENDPOINT_TYPE", "Inference API")
-        
-        # Set endpoint based on type
-        if endpoint_type == "Inference API":
-            endpoint = f"https://api-inference.huggingface.co/models/{model_name}"
-        elif endpoint_type == "Custom Endpoint":
-            endpoint = st.secrets.get("CUSTOM_ENDPOINT_URL", "")
-        else:  # Hugging Face Space
-            space_name = st.secrets.get("HF_SPACE_NAME", "")
-            endpoint = f"https://hf.space/{space_name}/api/chat" if space_name else ""
         
         # Advanced settings from secrets (with defaults)
         max_length = st.secrets.get("MAX_RESPONSE_LENGTH", 200)
         temperature = st.secrets.get("TEMPERATURE", 0.7)
         top_p = st.secrets.get("TOP_P", 0.9)
         
-    except (KeyError, FileNotFoundError):
-        st.error("🚨 **Configuration Error**: Required secrets not found. Please check your Streamlit secrets configuration.")
+    except Exception as e:
+        st.error(f"🚨 **Configuration Error**: {str(e)}")
         st.markdown("""
         **Required secrets:**
         ```toml
         HUGGINGFACE_TOKEN = "hf_your_token_here"
-        DEFAULT_MODEL = "Qwen/Qwen2.5-72B-Instruct"
+        DEFAULT_MODEL = "microsoft/DialoGPT-large"  # Fallback model
         DEFAULT_ENDPOINT_TYPE = "Inference API"
         ```
         """)
         return
     
-    # Sidebar with minimal controls
+    # Sidebar with model selection and controls
     with st.sidebar:
         st.header("🤖 J.A.R.V.I.S. Controls")
         
+        # Model selection
+        st.subheader("🧠 Model Selection")
+        selected_model_name = st.selectbox(
+            "Choose AI Model:",
+            options=list(AVAILABLE_MODELS.keys()),
+            index=0 if preferred_model not in AVAILABLE_MODELS.values() else list(AVAILABLE_MODELS.values()).index(preferred_model)
+        )
+        
+        model_name = AVAILABLE_MODELS[selected_model_name]
+        endpoint = f"https://api-inference.huggingface.co/models/{model_name}"
+        
+        # Test model availability
+        if st.button("🔍 Test Model", use_container_width=True):
+            with st.spinner("Testing model availability..."):
+                if test_model_availability(model_name, hf_token):
+                    st.success(f"✅ {selected_model_name} is available!")
+                else:
+                    st.error(f"❌ {selected_model_name} is not available. Try another model.")
+        
         # Status indicators
-        st.success("🔐 Configuration loaded from secrets")
-        st.info(f"🧠 Model: {model_name}")
+        st.success("🔐 Configuration loaded")
+        st.info(f"🧠 Current Model: {selected_model_name}")
         st.info(f"🌐 Endpoint: {endpoint_type}")
         
         st.markdown("---")
+        
+        # Advanced settings
+        with st.expander("⚙️ Advanced Settings"):
+            max_length = st.slider("Max Response Length", 50, 500, max_length)
+            temperature = st.slider("Temperature", 0.1, 2.0, temperature, 0.1)
+            top_p = st.slider("Top P", 0.1, 1.0, top_p, 0.1)
         
         # Clear chat history
         if st.button("🗑️ Clear Chat History", use_container_width=True):
@@ -179,7 +251,7 @@ def main():
     
     # Add J.A.R.V.I.S. description
     with st.expander("About J.A.R.V.I.S."):
-        st.markdown("""
+        st.markdown(f"""
         **J.A.R.V.I.S.** combines the intelligence of a supercomputer with the refined manners of a British butler:
         
         ✅ **Advanced natural language processing** with emotional intelligence  
@@ -189,7 +261,7 @@ def main():
         ✅ **Context-aware responses** that adapt to user preferences  
         ✅ **Ethical decision-making** with built-in safety constraints  
         
-        *Powered by Qwen/Qwen2.5-72B-Instruct model*
+        *Currently powered by: {selected_model_name}*
         """)
     
     # Display chat history
@@ -227,24 +299,33 @@ def main():
 
 Respond with sophistication, wit, and helpfulness while maintaining your distinctive personality."""
 
-        # Build conversation context
-        conversation_context = system_prompt + "\n\n"
-        for msg in st.session_state.messages[-3:]:  # Last 3 messages for context
-            role = "Human" if msg["role"] == "user" else "J.A.R.V.I.S."
-            conversation_context += f"{role}: {msg['content']}\n"
-        conversation_context += f"Human: {user_input}\nJ.A.R.V.I.S.:"
+        # Build conversation context (keep it shorter for better compatibility)
+        conversation_context = f"{system_prompt}\n\nHuman: {user_input}\nJ.A.R.V.I.S.:"
         
-        payload = {
-            "inputs": conversation_context,
-            "parameters": {
-                "max_new_tokens": max_length,
-                "temperature": temperature,
-                "top_p": top_p,
-                "do_sample": True,
-                "return_full_text": False,
-                "stop": ["Human:", "J.A.R.V.I.S.:"]
+        # Different payload based on model type
+        if "flan-t5" in model_name.lower():
+            # T5 models work better with simpler prompts
+            payload = {
+                "inputs": f"Answer this question in the style of a sophisticated British AI assistant: {user_input}",
+                "parameters": {
+                    "max_new_tokens": max_length,
+                    "temperature": temperature,
+                    "do_sample": True
+                }
             }
-        }
+        else:
+            # Other models
+            payload = {
+                "inputs": conversation_context,
+                "parameters": {
+                    "max_new_tokens": max_length,
+                    "temperature": temperature,
+                    "top_p": top_p,
+                    "do_sample": True,
+                    "return_full_text": False,
+                    "stop": ["Human:", "J.A.R.V.I.S.:", "\n\nHuman:", "\n\nJ.A.R.V.I.S.:"]
+                }
+            }
         
         # Show loading indicator with J.A.R.V.I.S. style
         with st.spinner("🧠 J.A.R.V.I.S. is thinking..."):
@@ -256,7 +337,7 @@ Respond with sophistication, wit, and helpfulness while maintaining your distinc
                 response = response.replace(conversation_context, "").strip()
             
             # Remove common prefixes
-            prefixes_to_remove = ["J.A.R.V.I.S.:", "Assistant:", "Bot:", "AI:", "Response:"]
+            prefixes_to_remove = ["J.A.R.V.I.S.:", "Assistant:", "Bot:", "AI:", "Response:", "Answer:"]
             for prefix in prefixes_to_remove:
                 if response.startswith(prefix):
                     response = response[len(prefix):].strip()
@@ -279,9 +360,9 @@ Respond with sophistication, wit, and helpfulness while maintaining your distinc
     # Footer
     st.markdown("---")
     st.markdown(
-        "🎩 **J.A.R.V.I.S.** - *Just A Rather Very Intelligent System* | "
-        "Powered by Qwen/Qwen2.5-72B-Instruct | "
-        "💡 **Tip:** J.A.R.V.I.S. responds with British wit and sophisticated intelligence."
+        f"🎩 **J.A.R.V.I.S.** - *Just A Rather Very Intelligent System* | "
+        f"Powered by {selected_model_name} | "
+        f"💡 **Tip:** J.A.R.V.I.S. responds with British wit and sophisticated intelligence."
     )
 
 if __name__ == "__main__":
